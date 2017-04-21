@@ -17,12 +17,50 @@
 #include <avr/power.h>
 #include <avr/interrupt.h>
 #include <util/delay.h>
+#include <stdlib.h>
+
+void setup_white();
+void setup_rainbow();
+void setup_pulse();
+void tick_rainbow();
+void tick_pulse();
+
+typedef void (*eventHandler)();
+
+#define PROGRAM_COUNT 3
+
+const eventHandler setupHandlers[] = {
+	setup_white,
+	setup_rainbow,
+	setup_pulse
+};
+
+const eventHandler tickHandlers[] = {
+	NULL,
+	tick_rainbow,
+	tick_pulse
+};
+
+struct rainbowdata {
+	uint8_t stage;
+};
+
+struct pulsedata {
+	uint8_t color;
+	uint8_t direction;
+};
+
+union programdata {
+	struct rainbowdata rainbow;
+	struct pulsedata pulse;
+} progdata;
 
 // program execution time, increments at ~33Hz
 volatile uint32_t programTicks = 0;
 volatile uint32_t pinStableAt = 0;
 volatile uint8_t bouncingPins = 0;
 volatile uint8_t stablePinState = 0b00001100; // assume both buttons are open at reset
+uint32_t lastTick = 0;
 uint8_t powerOn = 1;
 uint8_t program = 0;
 
@@ -40,37 +78,94 @@ void togglePower() {
 
 void incrementProgram() {
 	program++;
-	if(program > 6) program = 0;
+	if(program >= PROGRAM_COUNT) program = 0;
+	if(setupHandlers[program]) setupHandlers[program]();
+}
+
+void setup_white() {
+	RED_LEVEL = 255;
+	BLUE_LEVEL = 255;
+	GREEN_LEVEL = 255;
+}
+
+void setup_rainbow() {
+	RED_LEVEL = 255;
+	BLUE_LEVEL = 0;
+	GREEN_LEVEL = 0;
+	progdata.rainbow.stage = 0;
+}
+
+void tick_rainbow() {
+	switch(progdata.rainbow.stage) {
+		case 0:
+		RED_LEVEL--;
+		BLUE_LEVEL++;
+		if(RED_LEVEL == 0) progdata.rainbow.stage = 1;
+		break;
+		case 1:
+		BLUE_LEVEL--;
+		GREEN_LEVEL++;
+		if(BLUE_LEVEL == 0) progdata.rainbow.stage = 2;
+		break;
+		case 2:
+		GREEN_LEVEL--;
+		RED_LEVEL++;
+		if(GREEN_LEVEL == 0) progdata.rainbow.stage = 0;
+		break;
+		default:
+		progdata.rainbow.stage = 0;
+		break;
+	}
+}
+
+void setup_pulse() {
 	RED_LEVEL = 0;
 	BLUE_LEVEL = 0;
 	GREEN_LEVEL = 0;
-	switch(program) {
-		case 0:
-			RED_LEVEL = 255;
-			break;
-		case 1:
-			RED_LEVEL = 255;
-			GREEN_LEVEL = 255;
-			break;
-		case 2:
-			GREEN_LEVEL = 255;
-			break;
-		case 3:
-			GREEN_LEVEL = 255;
-			BLUE_LEVEL = 255;
-			break;
-		case 4:
-			BLUE_LEVEL = 255;
-			break;
-		case 5:
-			BLUE_LEVEL = 255;
-			RED_LEVEL = 255;
-			break;
-		default:
-			RED_LEVEL = 255;
-			BLUE_LEVEL = 255;
-			GREEN_LEVEL = 255;
-			break;
+	progdata.pulse.color = 0;
+	progdata.pulse.direction = 1;
+}
+
+void tick_pulse() {
+	if(progdata.pulse.direction) {
+		switch(progdata.pulse.color) {
+			case 0:
+				RED_LEVEL++;
+				if(RED_LEVEL == 255) progdata.pulse.direction = 0;
+				break;
+			case 1:
+				BLUE_LEVEL++;
+				if(BLUE_LEVEL == 255) progdata.pulse.direction = 0;
+				break;
+			case 2:
+				GREEN_LEVEL++;
+				if(GREEN_LEVEL == 255) progdata.pulse.direction = 0;
+				break;
+		}
+	} else {
+		switch(progdata.pulse.color) {
+			case 0:
+				RED_LEVEL--;
+				if(RED_LEVEL == 0) {
+					progdata.pulse.direction = 1;
+					progdata.pulse.color = 1;
+				}
+				break;
+			case 1:
+				BLUE_LEVEL--;
+				if(BLUE_LEVEL == 0) {
+					progdata.pulse.direction = 1;
+					progdata.pulse.color = 2;
+				}
+				break;
+			case 2:
+				GREEN_LEVEL--;
+				if(GREEN_LEVEL == 0) {
+					progdata.pulse.direction = 1;
+					progdata.pulse.color = 0;	
+				}
+				break;
+		}
 	}
 }
 
@@ -80,7 +175,8 @@ int main(void) {
 	MCUSR = 0x00;
 	// enable watchdog change
 	WDTCR |= (1<<WDCE) + (1<<WDE);
-	// interrupt on watchdog overflow, 32ms timeout
+	// setup watchdog prescalar to 16ms timeout
+	// interrupt on watchdog overflow
 	WDTCR = (1<<WDIE);
 	
 	// enable interrupts
@@ -113,11 +209,8 @@ int main(void) {
 	OCR1C = 255; // full 8-bit resolution on timer1 pwm
 	TCCR1 = 0b11111001; // reset on OCR1C match, OCR1A enabled (OCR1B doesn't work without OCR1A, OC0B seems to be a higher priority), ck/256 prescalar
 	
-	// turn off LEDs
-	GREEN_LEVEL = 0;
-	BLUE_LEVEL = 0;
-	RED_LEVEL = 255;
-	
+	if(setupHandlers[program]) setupHandlers[program]();
+		
 	// start timer0, leave OC1B in PWM mode
 	GTCCR = 0b01110000;
 	
@@ -138,13 +231,15 @@ int main(void) {
 			pinStableAt = 0;
 			stablePinState = PINB & 0b00001100;
 		}
+		if((lastTick != programTicks) && tickHandlers[program]) {
+			tickHandlers[program]();
+			lastTick = programTicks;
+		}
     }
 }
 
 // interrupt handler for watchdog timeout
 ISR(WDT_vect) {
-	sleep_disable();
-	power_all_enable();
 	programTicks++;
 }
 
