@@ -6,6 +6,8 @@
  */ 
 
 #define F_CPU 8000000UL
+// enable this define to save power/program state to internal eeprom with wear leveling
+//#define USE_EEPROM
 
 #define RED_LEVEL OCR1B
 #define GREEN_LEVEL OCR0A
@@ -16,6 +18,7 @@
 #include <avr/sleep.h>
 #include <avr/power.h>
 #include <avr/interrupt.h>
+#include <avr/eeprom.h>
 #include <util/delay.h>
 #include <stdlib.h>
 
@@ -73,31 +76,77 @@ union programdata {
 	struct blipdata blip;
 } progdata;
 
-// program execution time, increments at ~33Hz
+// program execution time, increments at ~62Hz
 volatile uint32_t programTicks = 0;
 volatile uint32_t pinStableAt = 0;
+uint32_t updateEepromAt = 0;
 volatile uint8_t bouncingPins = 0;
 volatile uint8_t stablePinState = 0b00001100; // assume both buttons are open at reset
 uint32_t lastTick = 0;
-uint8_t powerOn = 1;
-uint8_t program = 0;
+uint8_t writeLocation = 1;
+struct eepromData {
+	uint8_t writeCount;
+	uint8_t powerOn;
+	uint8_t program;
+} eepromData;
+
+void updateEeprom() {
+	#ifdef USE_EEPROM
+	eepromData.writeCount++;
+	if(eepromData.writeCount == 0) {
+		writeLocation += sizeof(eepromData);
+		if(writeLocation == 0 || writeLocation > 256 - sizeof(eepromData)) {
+			writeLocation = 1;
+			eeprom_busy_wait();
+			eeprom_write_byte((uint8_t *)0, writeLocation);
+		}
+	}
+	eeprom_busy_wait();
+	eeprom_update_block(&eepromData, (uint8_t *)(uint16_t) writeLocation, sizeof(eepromData));
+	#endif
+}
+
+void loadEeprom() {
+	// always initialize eepromData, even if we aren't storing information in the eeprom
+	eepromData.writeCount = 0;
+	eepromData.powerOn = 1;
+	eepromData.program = 0;
+	#ifdef USE_EEPROM
+	writeLocation = eeprom_read_byte((uint8_t *) 0);
+	if(writeLocation == 0 || writeLocation == 0xff) {
+		// uninitialized eeprom
+		writeLocation = 1;
+		eeprom_busy_wait();
+		eeprom_write_byte((uint8_t *)0, writeLocation);
+		updateEeprom();
+	} else {
+		eeprom_read_block(&eepromData, (uint8_t *)(uint16_t) writeLocation, sizeof(eepromData));
+	}
+	// sanity check
+	if(eepromData.program > PROGRAM_COUNT) eepromData.program = 0;
+	#endif
+}
 
 void togglePower() {
-	if(powerOn) {
-		powerOn = 0;
+	if(eepromData.powerOn) {
+		eepromData.powerOn = 0;
 		// make LED pins inputs, current limiter is set up to power down LEDs when these pins float
 		DDRB &= ~((1<<PB0) + (1<<PB1) + (1<<PB4));
 	} else {
-		powerOn = 1;
+		eepromData.powerOn = 1;
 		// make LED pins outputs again
 		DDRB |= (1<<PB0) + (1<<PB1) + (1<<PB4);
 	}
+	// only save the state to the eeprom if there hasn't been any activity for 5 seconds
+	updateEepromAt = programTicks + (5 * 62);
 }
 
 void incrementProgram() {
-	program++;
-	if(program >= PROGRAM_COUNT) program = 0;
-	if(setupHandlers[program]) setupHandlers[program]();
+	eepromData.program++;
+	if(eepromData.program >= PROGRAM_COUNT) eepromData.program = 0;
+	if(setupHandlers[eepromData.program]) setupHandlers[eepromData.program]();
+	// only save the state to the eeprom if there hasn't been any activity for 5 seconds
+	updateEepromAt = programTicks + (5 * 62);
 }
 
 void setup_blip() {
@@ -284,7 +333,10 @@ int main(void) {
 	OCR1C = 255; // full 8-bit resolution on timer1 pwm
 	TCCR1 = 0b11111001; // reset on OCR1C match, OCR1A enabled (OCR1B doesn't work without OCR1A, OC0B seems to be a higher priority), ck/256 prescalar
 	
-	if(setupHandlers[program]) setupHandlers[program]();
+	loadEeprom();
+	if(eepromData.powerOn == 0) DDRB &= ~((1<<PB0) + (1<<PB1) + (1<<PB4));
+	
+	if(setupHandlers[eepromData.program]) setupHandlers[eepromData.program]();
 		
 	// start timer0, leave OC1B in PWM mode
 	GTCCR = 0b01110000;
@@ -306,10 +358,15 @@ int main(void) {
 			pinStableAt = 0;
 			stablePinState = PINB & 0b00001100;
 		}
-		if((lastTick != programTicks) && tickHandlers[program]) {
-			tickHandlers[program]();
+		if((lastTick != programTicks) && tickHandlers[eepromData.program]) {
+			tickHandlers[eepromData.program]();
 			lastTick = programTicks;
 		}
+		if(updateEepromAt != 0 && updateEepromAt <= programTicks) {
+			updateEeprom();
+			updateEepromAt = 0;
+		}
+		// FIXME - if eepromData.powerOn is 0 and bouncingPins is 0, we might as well sleep here
     }
 }
 
