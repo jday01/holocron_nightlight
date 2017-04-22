@@ -19,23 +19,31 @@
 #include <util/delay.h>
 #include <stdlib.h>
 
+void setup_blip();
 void setup_white();
 void setup_rainbow();
 void setup_pulse();
 void tick_rainbow();
 void tick_pulse();
+void tick_blip();
 
 typedef void (*eventHandler)();
 
-#define PROGRAM_COUNT 3
+#define PROGRAM_COUNT 4
+
+int map(int x, int in_min, int in_max, int out_min, int out_max) {
+	return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
 
 const eventHandler setupHandlers[] = {
+	setup_blip,
 	setup_white,
 	setup_rainbow,
 	setup_pulse
 };
 
 const eventHandler tickHandlers[] = {
+	tick_blip,
 	NULL,
 	tick_rainbow,
 	tick_pulse
@@ -50,9 +58,19 @@ struct pulsedata {
 	uint8_t direction;
 };
 
+struct blipdata {
+	uint8_t delayCount;
+	uint8_t targetRed;
+	uint8_t targetBlue;
+	uint8_t targetGreen;
+	uint8_t stage;
+	uint8_t delayTime;
+};
+
 union programdata {
 	struct rainbowdata rainbow;
 	struct pulsedata pulse;
+	struct blipdata blip;
 } progdata;
 
 // program execution time, increments at ~33Hz
@@ -80,6 +98,63 @@ void incrementProgram() {
 	program++;
 	if(program >= PROGRAM_COUNT) program = 0;
 	if(setupHandlers[program]) setupHandlers[program]();
+}
+
+void setup_blip() {
+	srand(programTicks);
+	progdata.blip.delayCount = (rand() & 0x7f) + 127;
+	progdata.blip.stage = 0;
+	RED_LEVEL = 255;
+	BLUE_LEVEL = 255;
+	GREEN_LEVEL = 255;
+}
+
+void tick_blip() {
+	switch(progdata.blip.stage) {
+		case 0:
+			// hold white for a random delay
+			progdata.blip.delayCount--;
+			if(progdata.blip.delayCount == 0) {
+				progdata.blip.stage = 1;
+				progdata.blip.delayCount = (rand() & 0x3f) + 64;
+				progdata.blip.delayTime = progdata.blip.delayCount;
+				progdata.blip.targetBlue = rand();
+				progdata.blip.targetRed = rand();
+				progdata.blip.targetGreen = rand();
+			}
+			break;
+		case 1:
+			// head towards color
+			progdata.blip.delayCount--;
+			RED_LEVEL = map(progdata.blip.delayCount, 0, progdata.blip.delayTime, progdata.blip.targetRed, 255);
+			GREEN_LEVEL = map(progdata.blip.delayCount, 0, progdata.blip.delayTime, progdata.blip.targetGreen, 255);
+			BLUE_LEVEL = map(progdata.blip.delayCount, 0, progdata.blip.delayTime, progdata.blip.targetBlue, 255);
+			if(progdata.blip.delayCount == 0) {
+				progdata.blip.stage = 2;
+				progdata.blip.delayCount = (rand() & 0x3f) + 1; // max delay 64 ticks, ~1 second, min 1
+			}
+			break;
+		case 2:
+			// hold color
+			progdata.blip.delayCount--;
+			if(progdata.blip.delayCount == 0) {
+				progdata.blip.stage = 3;
+				progdata.blip.delayCount = (rand() & 0x3f) + 64;
+				progdata.blip.delayTime = progdata.blip.delayCount;
+			}
+			break;
+		case 3:
+			// return to white
+			progdata.blip.delayCount--;
+			RED_LEVEL = map(progdata.blip.delayCount, 0, progdata.blip.delayTime, 255, progdata.blip.targetRed);
+			BLUE_LEVEL = map(progdata.blip.delayCount, 0, progdata.blip.delayTime, 255, progdata.blip.targetBlue);
+			GREEN_LEVEL = map(progdata.blip.delayCount, 0, progdata.blip.delayTime, 255, progdata.blip.targetGreen);
+			if(progdata.blip.delayCount == 0) {
+				progdata.blip.stage = 0;
+				progdata.blip.delayCount = (rand() & 0x7f) + 127;
+			}
+			break;
+	}
 }
 
 void setup_white() {
