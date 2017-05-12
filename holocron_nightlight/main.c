@@ -26,13 +26,15 @@ void setup_blip();
 void setup_white();
 void setup_rainbow();
 void setup_pulse();
+void setup_flash();
 void tick_rainbow();
 void tick_pulse();
 void tick_blip();
+void tick_flash();
 
 typedef void (*eventHandler)();
 
-#define PROGRAM_COUNT 4
+#define PROGRAM_COUNT 5
 
 int map(int x, int in_min, int in_max, int out_min, int out_max) {
 	return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
@@ -42,14 +44,16 @@ const eventHandler setupHandlers[] = {
 	setup_blip,
 	setup_white,
 	setup_rainbow,
-	setup_pulse
+	setup_pulse,
+	setup_flash,
 };
 
 const eventHandler tickHandlers[] = {
 	tick_blip,
 	NULL,
 	tick_rainbow,
-	tick_pulse
+	tick_pulse,
+	tick_flash,
 };
 
 struct rainbowdata {
@@ -70,10 +74,18 @@ struct blipdata {
 	uint8_t delayTime;
 };
 
+struct flashdata {
+	uint8_t targetRed, targetBlue, targetGreen;
+	uint8_t stage;
+	uint8_t delayTime;
+	uint8_t delayCount;
+};
+
 union programdata {
 	struct rainbowdata rainbow;
 	struct pulsedata pulse;
 	struct blipdata blip;
+	struct flashdata flash;
 } progdata;
 
 // program execution time, increments at ~62Hz
@@ -147,6 +159,69 @@ void incrementProgram() {
 	if(setupHandlers[eepromData.program]) setupHandlers[eepromData.program]();
 	// only save the state to the eeprom if there hasn't been any activity for 5 seconds
 	updateEepromAt = programTicks + (5 * 62);
+}
+
+void setup_flash() {
+	srand(programTicks);
+	progdata.flash.delayCount = 0;
+	progdata.flash.stage = 0;
+	progdata.flash.delayTime = (rand() & 0x7f) + 1;
+	RED_LEVEL = 0;
+	BLUE_LEVEL = 0;
+	GREEN_LEVEL = 0;
+}
+
+void tick_flash() {
+	progdata.flash.delayCount++;
+	switch(progdata.flash.stage) {
+		case 0:
+			// hold off for a random delay
+			if(progdata.flash.delayCount == progdata.flash.delayTime) {
+				progdata.flash.stage = 1;
+				progdata.flash.delayTime = (rand() & 0x3f) + 64;
+				progdata.flash.delayCount = 0;
+				progdata.flash.targetBlue = rand();
+				progdata.flash.targetGreen = rand();
+				progdata.flash.targetRed = rand();
+			}
+			break;
+		case 1:
+			// head towards color
+			if(progdata.flash.delayCount == progdata.flash.delayTime) {
+				progdata.flash.stage = 2;
+				progdata.flash.delayCount = 0;
+				RED_LEVEL = progdata.flash.targetRed;
+				BLUE_LEVEL = progdata.flash.targetBlue;
+				GREEN_LEVEL = progdata.flash.targetGreen;
+				break;
+			}
+			RED_LEVEL = map(progdata.flash.delayCount, 0, progdata.flash.delayTime, 0, progdata.flash.targetRed);
+			GREEN_LEVEL = map(progdata.flash.delayCount, 0, progdata.flash.delayTime, 0, progdata.flash.targetGreen);
+			BLUE_LEVEL = map(progdata.flash.delayCount, 0, progdata.flash.delayTime, 0, progdata.flash.targetBlue);
+			break;
+		case 2:
+			// hold color
+			if(progdata.flash.delayCount == progdata.flash.delayTime) {
+				progdata.flash.stage = 3;
+				progdata.flash.delayCount = 0;
+			}
+			break;
+		case 3:
+			// go to black
+			if(progdata.flash.delayCount == progdata.flash.delayTime) {
+				progdata.flash.stage = 0;
+				progdata.flash.delayTime = (rand() % 254) + 1;
+				progdata.flash.delayCount = 0;
+				RED_LEVEL = 0;
+				BLUE_LEVEL = 0;
+				GREEN_LEVEL = 0;
+				break;
+			}
+			RED_LEVEL = map(progdata.flash.delayCount, 0, progdata.flash.delayTime, progdata.flash.targetRed, 0);
+			GREEN_LEVEL = map(progdata.flash.delayCount, 0, progdata.flash.delayTime, progdata.flash.targetGreen, 0);
+			BLUE_LEVEL = map(progdata.flash.delayCount, 0, progdata.flash.delayTime, progdata.flash.targetBlue, 0);
+			break;			
+	}
 }
 
 void setup_blip() {
@@ -293,6 +368,12 @@ void tick_pulse() {
 	}
 }
 
+void setup_low() {
+	RED_LEVEL = 16;
+	BLUE_LEVEL = 16;
+	GREEN_LEVEL = 16;
+}
+
 int main(void) {
 	wdt_reset();
 	// clear WDRF in MCUSR
@@ -326,12 +407,12 @@ int main(void) {
 	
 	// enable PWM on OC0A and OC0B
 	TCCR0A = 0b11110011; // inverted PWM, Fast PWM mode
-	TCCR0B = 0b00000100; // TOP is 0xFF, CLK is io/256 (should be 31.25khz)
+	TCCR0B = 0b00000011; // TOP is 0xFF, CLK is io/64 (should be 125khz, 488Hz PWM frequency?)
 	
 	// enable PWM on OC1B
 	//PLLCSR &= ~_BV(PCKE); //Set Synchronous mode (disable PLL)
 	OCR1C = 255; // full 8-bit resolution on timer1 pwm
-	TCCR1 = 0b11111001; // reset on OCR1C match, OCR1A enabled (OCR1B doesn't work without OCR1A, OC0B seems to be a higher priority), ck/256 prescalar
+	TCCR1 = 0b11110111; // reset on OCR1C match, OCR1A enabled (OCR1B doesn't work without OCR1A, OC0B seems to be a higher priority), ck/64 prescalar
 	
 	loadEeprom();
 	if(eepromData.powerOn == 0) DDRB &= ~((1<<PB0) + (1<<PB1) + (1<<PB4));
